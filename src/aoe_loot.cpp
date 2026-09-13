@@ -17,14 +17,48 @@
 
 #include "aoe_loot.h"
 #include "ObjectMgr.h"
+#include "Chat/Chat.h"
+#include "QuestDef.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
+#include "Cell.h"
+#include "CellImpl.h"
+
 #include <algorithm>
 #include <limits>
-
-std::map<uint64, bool> AoeLootCommandScript::playerAoeLootEnabled;
+#include <list>
 
 namespace
 {
     constexpr uint32 AOE_LOOT_STACK_LIMIT = 200;
+
+    // Custom grid checker: dead, lootable creatures within range.
+    class DeadCreatureInRangeCheck
+    {
+    public:
+        DeadCreatureInRangeCheck(WorldObject const* source, float range)
+            : m_source(source), m_range(range) {}
+
+        bool operator()(Creature* creature) const
+        {
+            if (!creature || creature->IsAlive())
+                return false;
+            if (!creature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
+                return false;
+            return creature->IsWithinDistInMap(m_source, m_range, true, SizeFactor::None);
+        }
+
+    private:
+        WorldObject const* m_source;
+        float m_range;
+    };
+
+    void GetDeadCreaturesInRange(Player* player, std::list<Creature*>& result, float range)
+    {
+        DeadCreatureInRangeCheck check(player, range);
+        MaNGOS::CreatureListSearcher<DeadCreatureInRangeCheck> searcher(result, check);
+        Cell::VisitGridObjects(player, searcher, range);
+    }
 
     bool CanStackRegularLoot(LootItem const& existingItem, LootItem const& incomingItem)
     {
@@ -36,17 +70,13 @@ namespace
             !incomingItem.needs_quest &&
             !existingItem.is_blocked &&
             !incomingItem.is_blocked &&
-            !existingItem.follow_loot_rules &&
-            !incomingItem.follow_loot_rules &&
-            existingItem.conditions.empty() &&
-            incomingItem.conditions.empty() &&
-            !existingItem.rollWinnerGUID &&
-            !incomingItem.rollWinnerGUID &&
+            existingItem.conditionId == 0 &&
+            incomingItem.conditionId == 0 &&
+            existingItem.lootOwner.IsEmpty() &&
+            incomingItem.lootOwner.IsEmpty() &&
             existingItem.itemid == incomingItem.itemid &&
-            existingItem.randomSuffix == incomingItem.randomSuffix &&
             existingItem.randomPropertyId == incomingItem.randomPropertyId &&
-            existingItem.is_underthreshold == incomingItem.is_underthreshold &&
-            existingItem.allowedGUIDs == incomingItem.allowedGUIDs;
+            existingItem.is_underthreshold == incomingItem.is_underthreshold;
     }
 
      uint32 AddOrStackRegularLoot(
@@ -54,12 +84,12 @@ namespace
         LootItem const& incomingItem,
         size_t reservedQuestRows)
     {
-        ItemTemplate const* itemTemplate =
-            sObjectMgr->GetItemTemplate(incomingItem.itemid);
+        ItemPrototype const* itemProto =
+            sObjectMgr.GetItemPrototype(incomingItem.itemid);
 
-        uint32 stackLimit = itemTemplate
+        uint32 stackLimit = itemProto
             ? std::min<uint32>(
-                itemTemplate->GetMaxStackSize(),
+                itemProto->GetMaxStackSize(),
                 AOE_LOOT_STACK_LIMIT)
             : 1;
 
@@ -67,9 +97,8 @@ namespace
             !incomingItem.freeforall &&
             !incomingItem.needs_quest &&
             !incomingItem.is_blocked &&
-            !incomingItem.follow_loot_rules &&
-            incomingItem.conditions.empty() &&
-            !incomingItem.rollWinnerGUID;
+            incomingItem.conditionId == 0 &&
+            incomingItem.lootOwner.IsEmpty();
 
         uint32 remaining = incomingItem.count;
         uint32 transferred = 0;
@@ -115,8 +144,6 @@ namespace
                 : remaining;
 
             newItem.count = static_cast<uint8>(newStackCount);
-            newItem.itemIndex =
-                static_cast<uint32>(mainLoot->items.size());
             newItem.is_looted = false;
             newItem.is_counted = false;
 
@@ -124,7 +151,7 @@ namespace
             transferred += newStackCount;
 
             if (!newItem.freeforall &&
-                newItem.conditions.empty() &&
+                newItem.conditionId == 0 &&
                 !newItem.needs_quest)
             {
                 ++mainLoot->unlootedCount;
@@ -138,20 +165,19 @@ namespace
 
         return transferred;
     }
-    
+
     uint8 GetLootSortPriority(LootItem const& item)
     {
-        ItemTemplate const* itemTemplate =
-            sObjectMgr->GetItemTemplate(item.itemid);
+        ItemPrototype const* itemProto =
+            sObjectMgr.GetItemPrototype(item.itemid);
 
         // Unknown templates behave like ordinary normal items.
-        if (!itemTemplate)
+        if (!itemProto)
             return 5;
 
         // Quality is checked first, regardless of item type.
-        switch (itemTemplate->Quality)
+        switch (itemProto->Quality)
         {
-            case ITEM_QUALITY_HEIRLOOM:
             case ITEM_QUALITY_ARTIFACT:
             case ITEM_QUALITY_LEGENDARY:
                 return 0;
@@ -174,22 +200,22 @@ namespace
         }
 
         // Normal crafting materials.
-        if (itemTemplate->Class == ITEM_CLASS_TRADE_GOODS ||
-            itemTemplate->Class == ITEM_CLASS_REAGENT ||
-            itemTemplate->Class == ITEM_CLASS_GEM)
+        if (itemProto->Class == ITEM_CLASS_TRADE_GOODS ||
+            itemProto->Class == ITEM_CLASS_REAGENT ||
+            itemProto->Class == ITEM_CLASS_GEM)
         {
             return 4;
         }
 
         // Normal food and drinks go below grey items.
-        if (itemTemplate->Class == ITEM_CLASS_CONSUMABLE &&
-            itemTemplate->SubClass == ITEM_SUBCLASS_FOOD)
+        if (itemProto->Class == ITEM_CLASS_CONSUMABLE &&
+            itemProto->SubClass == ITEM_SUBCLASS_FOOD)
         {
             return 7;
         }
 
         // Only normal-quality recipes reach this point.
-        if (itemTemplate->Class == ITEM_CLASS_RECIPE)
+        if (itemProto->Class == ITEM_CLASS_RECIPE)
             return 8;
 
         return 5;
@@ -200,9 +226,8 @@ namespace
         return !item.freeforall &&
             !item.needs_quest &&
             !item.is_blocked &&
-            !item.follow_loot_rules &&
-            item.conditions.empty() &&
-            !item.rollWinnerGUID;
+            item.conditionId == 0 &&
+            item.lootOwner.IsEmpty();
     }
 
     bool CanSafelySortLootItem(LootItem const& item)
@@ -231,9 +256,6 @@ namespace
                     return item.is_looted;
                 }),
             loot->items.end());
-
-        for (size_t i = 0; i < loot->items.size(); ++i)
-            loot->items[i].itemIndex = static_cast<uint32>(i);
     }
 
     void SortRegularLoot(Loot* loot)
@@ -256,21 +278,20 @@ namespace
                     GetLootSortPriority(right);
             });
 
-        // Sorting moved the items, so their stored indices must match
-        // their new positions.
-        for (size_t i = 0; i < loot->items.size(); ++i)
-            loot->items[i].itemIndex = static_cast<uint32>(i);
     }
 }
 
-void AOELootPlayer::OnPlayerLogin(Player* player)
+void AOELootPlayer::OnLogin(Player* player)
 {
     if (!player)
         return;
 
-    if (sConfigMgr->GetOption<bool>("AOELoot.Enable", true) && sConfigMgr->GetOption<bool>("AOELoot.Message", true))
+    if (sConfig.GetBoolDefault("AOELoot.Enable", true) &&
+        sConfig.GetBoolDefault("AOELoot.Message", true))
+    {
         if (WorldSession* session = player->GetSession())
-            ChatHandler(session).PSendModuleSysMessage(MODULE_STRING, AOE_LOGIN_MESSAGE);
+            ChatHandler(session).PSendSysMessage("AOE Loot is enabled.");
+    }
 }
 
 bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& packet)
@@ -288,21 +309,15 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         return true;
 
     // Check if module is enabled
-    if (!sConfigMgr->GetOption<bool>("AOELoot.Enable", true))
-        return true;
-
-    // Check if player has AOE loot disabled via command
-    uint64 playerGuid = player->GetGUID().GetRawValue();
-    if (AoeLootCommandScript::hasPlayerAoeLootEnabled(playerGuid) &&
-        !AoeLootCommandScript::getPlayerAoeLootEnabled(playerGuid))
+    if (!sConfig.GetBoolDefault("AOELoot.Enable", true))
         return true;
 
     // Check group settings
-    if (player->GetGroup() && !sConfigMgr->GetOption<bool>("AOELoot.Group", true))
+    if (player->GetGroup() && !sConfig.GetBoolDefault("AOELoot.Group", true))
         return true;
 
     // Get configured loot range
-    float range = sConfigMgr->GetOption<float>("AOELoot.Range", 55.0f);
+    float range = sConfig.GetFloatDefault("AOELoot.Range", 55.0f);
 
     // Limit range to reasonable values
     if (range < 5.0f)
@@ -325,20 +340,20 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         return true;
 
     // Check if main creature has loot
-    if (!mainCreature->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE))
+    if (!mainCreature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
         return true;
 
     // Get nearby corpses
     std::list<Creature*> nearbyCorpses;
-    player->GetDeadCreatureListInGrid(nearbyCorpses, range);
+    GetDeadCreaturesInRange(player, nearbyCorpses, range);
 
     // Remove invalid corpses and main target
     nearbyCorpses.remove_if([&](Creature* c)
         {
             return !c ||
-                c->GetGUID() == targetGuid ||
-                !c->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) ||
-                !player->isAllowedToLoot(c);
+                c->GetObjectGuid() == targetGuid ||
+                !c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE) ||
+                !c->IsTappedBy(player);
         });
 
     // If no other corpses, process normally
@@ -411,9 +426,9 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         }
 
         // Collect safe quest items needed by the player.
-        for (size_t i = 0; i < loot->quest_items.size(); ++i)
+        for (size_t i = 0; i < loot->m_questItems.size(); ++i)
         {
-            LootItem const& questItem = loot->quest_items[i];
+            LootItem const& questItem = loot->m_questItems[i];
 
             if (!player->HasQuestForItem(questItem.itemid))
                 continue;
@@ -422,27 +437,24 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             // source corpse so we don't damage ownership information.
             if (questItem.freeforall ||
                 questItem.is_blocked ||
-                questItem.follow_loot_rules ||
-                !questItem.conditions.empty() ||
-                questItem.rollWinnerGUID)
+                questItem.conditionId != 0 ||
+                !questItem.lootOwner.IsEmpty())
             {
                 continue;
             }
 
             uint32 maxNeeded = 0;
 
-            for (uint8 slot = 0;
-                 slot < MAX_QUEST_LOG_SIZE;
-                 ++slot)
+            for (auto const& questStatus : player->getQuestStatusMap())
             {
-                uint32 questId =
-                    player->GetQuestSlotQuestId(slot);
+                uint32 questId = questStatus.first;
+                QuestStatusData const& status = questStatus.second;
 
-                if (!questId)
+                if (status.m_status == QUEST_STATUS_NONE)
                     continue;
 
                 Quest const* quest =
-                    sObjectMgr->GetQuestTemplate(questId);
+                    sObjectMgr.GetQuestTemplate(questId);
 
                 if (!quest)
                     continue;
@@ -451,13 +463,13 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
                      j < QUEST_ITEM_OBJECTIVES_COUNT;
                      ++j)
                 {
-                    if (quest->RequiredItemId[j] ==
+                    if (quest->ReqItemId[j] ==
                             questItem.itemid &&
-                        quest->RequiredItemCount[j] >
+                        quest->ReqItemCount[j] >
                             maxNeeded)
                     {
                         maxNeeded =
-                            quest->RequiredItemCount[j];
+                            quest->ReqItemCount[j];
                     }
                 }
             }
@@ -476,7 +488,7 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             }
 
             for (LootItem const& mainQuestItem :
-                 mainLoot->quest_items)
+                 mainLoot->m_questItems)
             {
                 if (mainQuestItem.itemid == questItem.itemid)
                     ownedCount += mainQuestItem.count;
@@ -511,7 +523,7 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
     // Quest rows already belonging to the selected corpse still
     // occupy client loot-window capacity.
     size_t reservedQuestRows =
-        mainLoot->quest_items.size();
+        mainLoot->m_questItems.size();
 
     // Transfer regular candidates in priority order.
     for (RegularLootCandidate const& candidate :
@@ -574,13 +586,13 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             &candidate.sourceCreature->loot;
 
         if (candidate.sourceIndex >=
-            sourceLoot->quest_items.size())
+            sourceLoot->m_questItems.size())
         {
             continue;
         }
 
         LootItem& sourceItem =
-            sourceLoot->quest_items[
+            sourceLoot->m_questItems[
                 candidate.sourceIndex];
 
         if (sourceItem.is_looted)
@@ -627,11 +639,10 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             continue;
 
         creature->AllLootRemovedFromCorpse();
-        creature->RemoveDynamicFlag(
-            UNIT_DYNFLAG_LOOTABLE);
+        creature->RemoveFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE);
         loot->clear();
     }
-    
+
     // Organize regular loot before sending the window.
     SortRegularLoot(mainLoot);
 
@@ -641,76 +652,4 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
     return false;
 }
 
-ChatCommandTable AoeLootCommandScript::GetCommands() const
-{
-    static ChatCommandTable aoeLootSubCommandTable =
-    {
-        { "on", HandleAoeLootOnCommand, SEC_PLAYER, Console::No },
-        { "off", HandleAoeLootOffCommand, SEC_PLAYER, Console::No }
-    };
 
-    static ChatCommandTable aoeLootCommandTable =
-    {
-        { "aoeloot", aoeLootSubCommandTable }
-    };
-
-    return aoeLootCommandTable;
-}
-
-bool AoeLootCommandScript::hasPlayerAoeLootEnabled(uint64 guid)
-{
-    return playerAoeLootEnabled.count(guid) > 0;
-}
-
-bool AoeLootCommandScript::getPlayerAoeLootEnabled(uint64 guid)
-{
-    auto it = playerAoeLootEnabled.find(guid);
-    if (it != playerAoeLootEnabled.end())
-        return it->second;
-    return false;
-}
-
-void AoeLootCommandScript::setPlayerAoeLootEnabled(uint64 guid, bool mode)
-{
-    playerAoeLootEnabled[guid] = mode;
-}
-
-bool AoeLootCommandScript::HandleAoeLootOnCommand(ChatHandler* handler, Optional<std::string> /*args*/)
-{
-    Player* player = handler->GetSession()->GetPlayer();
-    if (!player)
-        return true;
-
-    uint64 playerGuid = player->GetGUID().GetRawValue();
-
-    if (AoeLootCommandScript::hasPlayerAoeLootEnabled(playerGuid) &&
-        AoeLootCommandScript::getPlayerAoeLootEnabled(playerGuid))
-    {
-        handler->PSendModuleSysMessage(MODULE_STRING, AOE_LOOT_ALREADY_ENABLED);
-        return true;
-    }
-
-    AoeLootCommandScript::setPlayerAoeLootEnabled(playerGuid, true);
-    handler->PSendModuleSysMessage(MODULE_STRING, AOE_LOOT_ENABLED);
-    return true;
-}
-
-bool AoeLootCommandScript::HandleAoeLootOffCommand(ChatHandler* handler, Optional<std::string> /*args*/)
-{
-    Player* player = handler->GetSession()->GetPlayer();
-    if (!player)
-        return true;
-
-    uint64 playerGuid = player->GetGUID().GetRawValue();
-
-    if (AoeLootCommandScript::hasPlayerAoeLootEnabled(playerGuid) &&
-        !AoeLootCommandScript::getPlayerAoeLootEnabled(playerGuid))
-    {
-        handler->PSendModuleSysMessage(MODULE_STRING, AOE_LOOT_ALREADY_DISABLED);
-        return true;
-    }
-
-    AoeLootCommandScript::setPlayerAoeLootEnabled(playerGuid, false);
-    handler->PSendModuleSysMessage(MODULE_STRING, AOE_LOOT_DISABLED);
-    return true;
-}

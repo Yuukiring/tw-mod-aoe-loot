@@ -18,44 +18,27 @@
 #ifndef MODULE_AOELOOT_H
 #define MODULE_AOELOOT_H
 
-#include "ScriptMgr.h"
-#include "Config.h"
-#include "Chat.h"
+#include "ScriptObjects.h"
+#include "Config/Config.h"
 #include "Player.h"
-#include "ScriptedGossip.h"
-#include "Group.h"
 #include "LootMgr.h"
 #include "Creature.h"
 #include "Log.h"
+
 #include <vector>
 #include <list>
 #include <algorithm>
 #include <string>
 
-#define MODULE_STRING "mod-aoe-loot"
-
- // Maximum loot items count
+// Maximum loot items count
 constexpr size_t MAX_LOOT_ITEMS = 16;
-using namespace Acore::ChatCommands;
-
-enum AoeLootString
-{
-    AOE_LOGIN_MESSAGE = 1,         // Login message
-    AOE_ITEM_IN_THE_MAIL = 2,      // Mail notification
-    AOE_MODULE_ACTIVE = 3,         // unused
-    AOE_QUEST_ITEM_SENT = 4,       // unused
-    AOE_LOOT_ALREADY_ENABLED = 5,  // Already enabled message
-    AOE_LOOT_ENABLED = 6,          // Enabled confirmation
-    AOE_LOOT_ALREADY_DISABLED = 7, // Already disabled message
-    AOE_LOOT_DISABLED = 8          // Disabled confirmation
-};
 
 class AOELootPlayer : public PlayerScript
 {
 public:
     AOELootPlayer() : PlayerScript("AOELootPlayer", { PLAYERHOOK_ON_LOGIN }) {}
 
-    void OnPlayerLogin(Player* player) override;
+    void OnLogin(Player* player) override;
 };
 
 class AOELootServer : public ServerScript
@@ -64,75 +47,12 @@ public:
     AOELootServer() : ServerScript("AOELootServer", { SERVERHOOK_CAN_PACKET_RECEIVE }) {}
 
     bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override;
-
-private:
-    // Helper function - Check if loot is valid
-    bool IsLootValid(Loot* loot) const;
-
-    // Check if loot can be merged
-    bool CanMergeLoot(Player* player, Creature* creature) const;
-
-    // Safely get item count
-    size_t GetSafeItemCount(Loot* loot) const;
-
-    // Safely merge loot items
-    bool SafeMergeLootItems(Loot* mainLoot, Loot* sourceLoot, size_t& remainingSlots);
-};
-
-// Configuration options structure (optional, for better config management)
-struct AOELootConfig
-{
-    bool enabled = true;
-    bool messageOnLogin = true;
-    bool allowInGroup = true;
-    float range = 55.0f;
-    uint32 maxCorpses = 20;
-
-    static AOELootConfig* instance()
-    {
-        static AOELootConfig instance;
-        return &instance;
-    }
-
-    void Load()
-    {
-        enabled = sConfigMgr->GetOption<bool>("AOELoot.Enable", true);
-        messageOnLogin = sConfigMgr->GetOption<bool>("AOELoot.Message", true);
-        allowInGroup = sConfigMgr->GetOption<bool>("AOELoot.Group", true);
-        range = sConfigMgr->GetOption<float>("AOELoot.Range", 55.0f);
-        maxCorpses = sConfigMgr->GetOption<uint32>("AOELoot.MaxCorpses", 20);
-
-        // Validate configuration values
-        if (range < 5.0f) range = 5.0f;
-        if (range > 100.0f) range = 100.0f;
-        if (maxCorpses < 1) maxCorpses = 1;
-        if (maxCorpses > 50) maxCorpses = 50;
-    }
-};
-
-class AoeLootCommandScript : public CommandScript
-{
-public:
-    AoeLootCommandScript() : CommandScript("AoeLootCommandScript") {}
-    ChatCommandTable GetCommands() const override;
-
-    static bool HandleAoeLootOnCommand(ChatHandler* handler, Optional<std::string> args);
-    static bool HandleAoeLootOffCommand(ChatHandler* handler, Optional<std::string> args);
-
-    // Getters and setters for player AOE loot settings
-    static bool getPlayerAoeLootEnabled(uint64 guid);
-    static void setPlayerAoeLootEnabled(uint64 guid, bool mode);
-    static bool hasPlayerAoeLootEnabled(uint64 guid);
-
-private:
-    static std::map<uint64, bool> playerAoeLootEnabled;
 };
 
 void AddSC_AoeLoot()
 {
     new AOELootPlayer();
     new AOELootServer();
-    new AoeLootCommandScript();
 }
 
-#endif //MODULE_AOELOOT_H
+#endif // MODULE_AOELOOT_H

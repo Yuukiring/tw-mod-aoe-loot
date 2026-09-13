@@ -19,7 +19,7 @@
 void AddSC_AoeLoot();
 
 // Add all
-void Addmod_aoe_lootScripts()
+void Addtw_mod_aoe_lootScripts()
 {
     AddSC_AoeLoot();
 }

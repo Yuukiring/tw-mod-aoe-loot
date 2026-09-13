@@ -16,6 +16,9 @@
 ########################################
 # AoeLoot module configuration
 ########################################
+
+[AOELoot]
+
 #
 #    AOELoot.Enable
 #        Description: Enables Module
@@ -27,7 +30,7 @@ AOELoot.Enable = 1
 
 #
 #    AOELoot.Message
-#        Description: Enables area loot if the player is in a group
+#        Description: Show informational message on player login
 #        Default:     1 - (Enabled)
 #                     0 - (Disabled)
 #
