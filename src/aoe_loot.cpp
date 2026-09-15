@@ -520,10 +520,82 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
                 GetLootSortPriority(right.item);
         });
 
-    // Quest rows already belonging to the selected corpse still
-    // occupy client loot-window capacity.
-    size_t reservedQuestRows =
-        mainLoot->m_questItems.size();
+    // Merge safe quest items into the main loot window. Quest items
+    // that do not fit in the 16-slot client loot window are left on
+    // their source corpses.
+    for (QuestLootCandidate const& candidate : questCandidates)
+    {
+        if (!player->HasQuestForItem(candidate.item.itemid))
+            continue;
+
+        Loot* sourceLoot = &candidate.sourceCreature->loot;
+
+        if (candidate.sourceIndex >= sourceLoot->m_questItems.size())
+            continue;
+
+        LootItem& sourceItem = sourceLoot->m_questItems[candidate.sourceIndex];
+
+        if (sourceItem.is_looted)
+            continue;
+
+        size_t existingMainQuestRows = std::count_if(
+            mainLoot->m_questItems.begin(),
+            mainLoot->m_questItems.end(),
+            [](LootItem const& item) { return !item.is_looted; });
+
+        if (mainLoot->items.size() + existingMainQuestRows >= MAX_LOOT_ITEMS)
+            break;
+
+        if (mainLoot->m_questItems.size() >= MAX_NR_QUEST_ITEMS)
+            break;
+
+        uint32 amountToAdd = std::min<uint32>(
+            candidate.item.count,
+            sourceItem.count);
+
+        if (amountToAdd == 0)
+            continue;
+
+        LootItem newItem = sourceItem;
+        newItem.count = static_cast<uint8>(amountToAdd);
+        newItem.is_looted = false;
+        newItem.is_blocked = false;
+        newItem.is_counted = false;
+        newItem.lootOwner = ObjectGuid();
+
+        mainLoot->m_questItems.push_back(newItem);
+
+        if (amountToAdd >= sourceItem.count)
+        {
+            sourceItem.is_looted = true;
+
+            if (sourceLoot->unlootedCount > 0)
+                --sourceLoot->unlootedCount;
+        }
+        else
+        {
+            sourceItem.count = static_cast<uint8>(
+                sourceItem.count - amountToAdd);
+        }
+    }
+
+    // Refresh the player's quest-loot view so the merged quest items
+    // appear in the combined loot window.
+    {
+        uint32 playerGuidLow = player->GetGUIDLow();
+        auto qmapItr = mainLoot->m_playerQuestItems.find(playerGuidLow);
+        if (qmapItr != mainLoot->m_playerQuestItems.end())
+        {
+            delete qmapItr->second;
+            mainLoot->m_playerQuestItems.erase(qmapItr);
+        }
+
+        mainLoot->FillNotNormalLootFor(player);
+    }
+
+    // Quest rows already belonging to the selected corpse, plus any
+    // quest rows merged from nearby corpses, occupy loot-window capacity.
+    size_t reservedQuestRows = mainLoot->m_questItems.size();
 
     // Transfer regular candidates in priority order.
     for (RegularLootCandidate const& candidate :
@@ -568,59 +640,6 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             // Only part of the stack fitted. Preserve the remainder.
             sourceItem.count = static_cast<uint8>(
                 sourceCount - transferred);
-        }
-    }
-
-    // Add safe quest items directly to inventory. Their source rows
-    // are changed only after AddItem reports success.
-    for (QuestLootCandidate const& candidate :
-         questCandidates)
-    {
-        if (!player->HasQuestForItem(
-                candidate.item.itemid))
-        {
-            continue;
-        }
-
-        Loot* sourceLoot =
-            &candidate.sourceCreature->loot;
-
-        if (candidate.sourceIndex >=
-            sourceLoot->m_questItems.size())
-        {
-            continue;
-        }
-
-        LootItem& sourceItem =
-            sourceLoot->m_questItems[
-                candidate.sourceIndex];
-
-        if (sourceItem.is_looted)
-            continue;
-
-        uint32 amountToAdd = std::min<uint32>(
-            candidate.item.count,
-            sourceItem.count);
-
-        if (amountToAdd == 0 ||
-            !player->AddItem(
-                sourceItem.itemid,
-                amountToAdd))
-        {
-            continue;
-        }
-
-        if (amountToAdd >= sourceItem.count)
-        {
-            sourceItem.is_looted = true;
-
-            if (sourceLoot->unlootedCount > 0)
-                --sourceLoot->unlootedCount;
-        }
-        else
-        {
-            sourceItem.count = static_cast<uint8>(
-                sourceItem.count - amountToAdd);
         }
     }
 
