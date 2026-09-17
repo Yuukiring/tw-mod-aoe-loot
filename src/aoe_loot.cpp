@@ -25,12 +25,92 @@
 #include "CellImpl.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <limits>
 #include <list>
+#include <sstream>
+#include <string>
 
 namespace
 {
     constexpr uint32 AOE_LOOT_STACK_LIMIT = 200;
+
+    // Parses AOELoot.RequiredItemId. The value is a comma-separated list
+    // of item ids, where "0" (or an empty value) means "no item required".
+    // The result is cached and only rebuilt when the raw config changes.
+    std::vector<uint32> const& AOELoot_GetRequiredItemIds()
+    {
+        static std::vector<uint32> ids;
+        static std::string cachedRaw;
+        static bool inited = false;
+
+        std::string raw =
+            sConfig.GetStringDefault("AOELoot.RequiredItemId", "0");
+
+        if (!inited || raw != cachedRaw)
+        {
+            ids.clear();
+
+            if (!raw.empty())
+            {
+                std::stringstream ss(raw);
+                std::string token;
+
+                while (std::getline(ss, token, ','))
+                {
+                    token.erase(
+                        std::remove_if(
+                            token.begin(),
+                            token.end(),
+                            [](unsigned char c) { return std::isspace(c) != 0; }),
+                        token.end());
+
+                    if (token.empty())
+                        continue;
+
+                    char* end = nullptr;
+                    unsigned long value =
+                        std::strtoul(token.c_str(), &end, 10);
+
+                    if (end != token.c_str() &&
+                        *end == '\0' &&
+                        value <= std::numeric_limits<uint32>::max())
+                    {
+                        ids.push_back(static_cast<uint32>(value));
+                    }
+                }
+            }
+
+            cachedRaw = raw;
+            inited = true;
+        }
+
+        return ids;
+    }
+
+    // Area loot stays inactive until the player carries one of the
+    // configured items. Without it the loot request is handled by the
+    // normal single-corpse logic instead.
+    bool AOELoot_HasRequiredItem(Player* player)
+    {
+        std::vector<uint32> const& requiredIds =
+            AOELoot_GetRequiredItemIds();
+
+        if (requiredIds.empty() ||
+            (requiredIds.size() == 1 && requiredIds[0] == 0))
+        {
+            return true;
+        }
+
+        for (uint32 itemId : requiredIds)
+        {
+            if (player->HasItemCount(itemId, 1, false))
+                return true;
+        }
+
+        return false;
+    }
 
     // Custom grid checker: dead, lootable creatures within range.
     class DeadCreatureInRangeCheck
@@ -314,6 +394,11 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
 
     // Check group settings
     if (player->GetGroup() && !sConfig.GetBoolDefault("AOELoot.Group", true))
+        return true;
+
+    // Check for a required item in the player's bags before merging.
+    // Without it, the corpse is looted normally one at a time.
+    if (!AOELoot_HasRequiredItem(player))
         return true;
 
     // Get configured loot range

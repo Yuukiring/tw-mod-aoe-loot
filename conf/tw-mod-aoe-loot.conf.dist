@@ -35,7 +35,7 @@ AOELoot.Enable = 1
 #                     0 - (Disabled)
 #
 
-AOELoot.Message = 1
+AOELoot.Message = 0
 
 #
 #    AOELoot.Range
@@ -44,7 +44,7 @@ AOELoot.Message = 1
 #       Range:      5.0 - 100.0
 #
 
-AOELoot.Range = 55.0
+AOELoot.Range = 30.0
 
 #
 #    AOELoot.Group
@@ -53,4 +53,15 @@ AOELoot.Range = 55.0
 #                     0 - (Disabled)
 #
 
-AOELoot.Group = 1
+AOELoot.Group = 0
+
+#
+#    AOELoot.RequiredItemId
+#        Description: Allows setting an item required in bags to activate area loot.
+#                     A single item ID or a comma separated list of item IDs.
+#                     Without the item the corpse is looted one at a time.
+#        Default:     0 - No Item Required
+#                     xxxxx - Specify the item ID
+#
+
+AOELoot.RequiredItemId = 0
