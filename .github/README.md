@@ -8,7 +8,7 @@ This module lets players loot multiple nearby corpses by interacting with just o
 
 - **AOE looting**: loot nearby corpses with a single interaction.
 - **Gold merging**: accumulates gold from all corpses into the selected corpse.
-- **Quest items**: quest items needed by the player are added directly to inventory.
+- **Quest items**: quest items needed by the player are merged into the combined loot window.
 - **Stacking**: combines identical regular loot items up to the item's stack limit.
 - **Group aware**: optional setting to allow or disallow AOE loot while grouped.
 - **Configurable range**: server administrators can set the maximum loot radius.
@@ -74,7 +74,7 @@ AOELoot.Message = 1
 1. Kill multiple enemies near each other.
 2. Right-click any lootable corpse.
 3. Loot from nearby corpses appears in the same window.
-4. Quest items for your active quests are added to your bags automatically.
+4. Quest items for your active quests appear in the combined loot window.
 
 ## Corpse decay recommendation
 

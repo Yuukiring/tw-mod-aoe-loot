@@ -435,8 +435,11 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
 
             // Special group/free-for-all quest items remain on their
             // source corpse so we don't damage ownership information.
+            // Note: is_blocked is set by FillQuestLoot during initial loot
+            // generation and only tracks whether the row has been added to a
+            // player's quest-loot view; it does not indicate ownership, so it
+            // must not prevent eligible quest items from being merged.
             if (questItem.freeforall ||
-                questItem.is_blocked ||
                 questItem.conditionId != 0 ||
                 !questItem.lootOwner.IsEmpty())
             {
