@@ -236,6 +236,50 @@ namespace
             HasSimpleRegularLootRules(item);
     }
 
+    // Rolls and master loot point at rows by index.
+    bool HasPendingRoll(Loot const& loot)
+    {
+        auto isPending = [](LootItem const& item)
+        {
+            return !item.is_looted &&
+                (item.is_blocked || !item.lootOwner.IsEmpty());
+        };
+
+        // Quest items use is_blocked for per-player visibility tracking
+        // (FillQuestLoot), so they are not a pending roll/reservation.
+        return std::any_of(
+                loot.items.begin(),
+                loot.items.end(),
+                isPending);
+    }
+
+    bool IsReservedByGroupLootRules(
+        Player const* player,
+        Loot const& loot,
+        LootItem const& item)
+    {
+        Group const* group = player->GetGroup();
+
+        if (!group || group->GetLootMethod() == FREE_FOR_ALL)
+            return false;
+
+        // Rolls only start when the corpse is first opened.
+        if (group->GetLootMethod() != ROUND_ROBIN &&
+            !item.is_underthreshold)
+        {
+            return true;
+        }
+
+        if (!loot.roundRobinPlayer ||
+            loot.roundRobinPlayer == player->GetGUID())
+        {
+            return false;
+        }
+
+        return group->GetLootMethod() == ROUND_ROBIN ||
+            item.is_underthreshold;
+    }
+
     void CompactTransferredRegularLoot(Loot* loot)
     {
         if (!loot ||
@@ -343,6 +387,9 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
     if (!mainCreature->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE))
         return true;
 
+    if (HasPendingRoll(mainCreature->loot))
+        return true;
+
     // Get nearby corpses
     std::list<Creature*> nearbyCorpses;
     GetDeadCreaturesInRange(player, nearbyCorpses, range);
@@ -353,6 +400,8 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             return !c ||
                 c->GetObjectGuid() == targetGuid ||
                 !c->HasFlag(UNIT_DYNAMIC_FLAGS, UNIT_DYNFLAG_LOOTABLE) ||
+                c->loot.loot_type == LOOT_SKINNING ||
+                HasPendingRoll(c->loot) ||
                 !c->IsTappedBy(player);
         });
 
@@ -421,6 +470,19 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             if (!CanSafelySortLootItem(item))
                 continue;
 
+            // The row ends up on the clicked corpse.
+            if (!item.AllowedForPlayer(
+                    player, mainLoot->GetLootTarget()))
+            {
+                continue;
+            }
+
+            if (IsReservedByGroupLootRules(player, *loot, item) ||
+                IsReservedByGroupLootRules(player, *mainLoot, item))
+            {
+                continue;
+            }
+
             regularCandidates.push_back(
                 { creature, i, item });
         }
@@ -442,6 +504,14 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             if (questItem.freeforall ||
                 questItem.conditionId != 0 ||
                 !questItem.lootOwner.IsEmpty())
+            {
+                continue;
+            }
+
+            // Quest rows are only filled for looters present at the kill.
+            if (!questItem.AllowedForPlayer(
+                    player, loot->GetLootTarget()) ||
+                !loot->IsAllowedLooter(player->GetObjectGuid()))
             {
                 continue;
             }
