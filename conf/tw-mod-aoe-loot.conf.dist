@@ -65,3 +65,16 @@ AOELoot.Group = 0
 #
 
 AOELoot.RequiredItemId = 0
+
+#
+#    AOELoot.GroupRequiredItemId
+#        Description: Grants a group-loot permission exception. When the player
+#                     is in a group and AOELoot.Group is disabled (0), carrying
+#                     at least one of the listed items still enables area loot.
+#                     A single item ID or a comma separated list of item IDs.
+#                     Set to 0 (or empty) to disable the exception entirely.
+#        Default:     38110 - (Item that permits grouped area loot)
+#                     0     - No group-loot exception
+#
+
+AOELoot.GroupRequiredItemId = 38110

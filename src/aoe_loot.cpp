@@ -112,6 +112,83 @@ namespace
         return false;
     }
 
+    // Parses AOELoot.GroupRequiredItemId. Same comma-separated format as
+    // AOELoot.RequiredItemId. A non-empty list grants an exception that lets
+    // a grouped player use area loot even when AOELoot.Group is disabled.
+    std::vector<uint32> const& AOELoot_GetGroupRequiredItemIds()
+    {
+        static std::vector<uint32> ids;
+        static std::string cachedRaw;
+        static bool inited = false;
+
+        std::string raw =
+            sConfig.GetStringDefault("AOELoot.GroupRequiredItemId", "38110");
+
+        if (!inited || raw != cachedRaw)
+        {
+            ids.clear();
+
+            if (!raw.empty())
+            {
+                std::stringstream ss(raw);
+                std::string token;
+
+                while (std::getline(ss, token, ','))
+                {
+                    token.erase(
+                        std::remove_if(
+                            token.begin(),
+                            token.end(),
+                            [](unsigned char c) { return std::isspace(c) != 0; }),
+                        token.end());
+
+                    if (token.empty())
+                        continue;
+
+                    char* end = nullptr;
+                    unsigned long value =
+                        std::strtoul(token.c_str(), &end, 10);
+
+                    if (end != token.c_str() &&
+                        *end == '\0' &&
+                        value <= std::numeric_limits<uint32>::max())
+                    {
+                        ids.push_back(static_cast<uint32>(value));
+                    }
+                }
+            }
+
+            cachedRaw = raw;
+            inited = true;
+        }
+
+        return ids;
+    }
+
+    // Returns true only when the group-loot exception is configured AND the
+    // player carries at least one of the listed items. An empty list or a
+    // single "0" disables the exception entirely (no grouped area loot
+    // beyond what AOELoot.Group already allows).
+    bool AOELoot_HasGroupRequiredItem(Player* player)
+    {
+        std::vector<uint32> const& ids =
+            AOELoot_GetGroupRequiredItemIds();
+
+        if (ids.empty() ||
+            (ids.size() == 1 && ids[0] == 0))
+        {
+            return false;
+        }
+
+        for (uint32 itemId : ids)
+        {
+            if (player->HasItemCount(itemId, 1, false))
+                return true;
+        }
+
+        return false;
+    }
+
     // Custom grid checker: dead, lootable creatures within range.
     class DeadCreatureInRangeCheck
     {
@@ -392,9 +469,15 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
     if (!sConfig.GetBoolDefault("AOELoot.Enable", true))
         return true;
 
-    // Check group settings
-    if (player->GetGroup() && !sConfig.GetBoolDefault("AOELoot.Group", true))
+    // Check group settings. Area loot while grouped is off by default, but a
+    // player carrying the group-loot permission item (AOELoot.GroupRequiredItemId)
+    // is still allowed to area-loot even when AOELoot.Group is disabled.
+    if (player->GetGroup() &&
+        !sConfig.GetBoolDefault("AOELoot.Group", true) &&
+        !AOELoot_HasGroupRequiredItem(player))
+    {
         return true;
+    }
 
     // Check for a required item in the player's bags before merging.
     // Without it, the corpse is looted normally one at a time.
