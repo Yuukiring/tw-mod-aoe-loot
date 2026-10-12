@@ -820,18 +820,66 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         }
     }
 
-    // Refresh the player's quest-loot view so the merged quest items
-    // appear in the combined loot window.
+    // Make the merged quest rows visible in the combined loot window.
+    //
+    // Never rebuild this player's quest view from scratch here. The
+    // per-player QuestItem::is_looted flag is the only record that a given
+    // player already looted a row: rows flagged freeforall
+    // (ITEM_FLAG_PARTY_LOOT, e.g. item 41985 "Crest of Valor") never get
+    // LootItem::is_looted set, because every group member is meant to loot
+    // their own copy. Wiping the view resets those flags, so as long as any
+    // other member has not looted the row yet the item reappears on every
+    // corpse open and the player can farm unlimited copies of it.
     {
         uint32 playerGuidLow = player->GetGUIDLow();
         auto qmapItr = mainLoot->m_playerQuestItems.find(playerGuidLow);
-        if (qmapItr != mainLoot->m_playerQuestItems.end())
-        {
-            delete qmapItr->second;
-            mainLoot->m_playerQuestItems.erase(qmapItr);
-        }
 
-        mainLoot->FillNotNormalLootFor(player);
+        if (qmapItr == mainLoot->m_playerQuestItems.end())
+        {
+            // First look at this loot: the normal fill path is correct and
+            // also covers the FFA / conditional rows.
+            mainLoot->FillNotNormalLootFor(player);
+        }
+        else
+        {
+            // Append only the rows this player has no entry for yet, so the
+            // looted state of the already known rows stays untouched.
+            QuestItemList* view = qmapItr->second;
+
+            for (size_t i = 0; i < mainLoot->m_questItems.size(); ++i)
+            {
+                LootItem& item = mainLoot->m_questItems[i];
+
+                if (item.is_looted ||
+                    !item.AllowedForPlayer(
+                        player, mainLoot->GetLootTarget()))
+                {
+                    continue;
+                }
+
+                bool known = false;
+
+                for (QuestItem const& existing : *view)
+                {
+                    if (static_cast<size_t>(existing.index) == i)
+                    {
+                        known = true;
+                        break;
+                    }
+                }
+
+                if (known)
+                    continue;
+
+                view->push_back(QuestItem(static_cast<uint8>(i)));
+
+                // Same bookkeeping as Loot::FillQuestLoot().
+                if (item.freeforall || !item.is_blocked)
+                    ++mainLoot->unlootedCount;
+
+                item.is_blocked = true;
+            }
+        }
     }
 
     // Quest rows already belonging to the selected corpse, plus any
